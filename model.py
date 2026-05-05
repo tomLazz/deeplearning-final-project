@@ -1,108 +1,136 @@
+import copy
 import torch
-import yaml
-from ml_collections import ConfigDict
-from bs_roformer import get_model_from_config
+import torch.nn as nn
+import torch.nn.functional as F
+from einops import rearrange
+from frequency_transformer import load_bs_roformer
+from time_module import TemporalBranch
+from fusion_module import GatedFusion
 
-# 1. Custom Loader to handle !!python/tuple in the YAML
-class SafeLoaderWithTuple(yaml.SafeLoader):
-    def construct_python_tuple(self, node):
-        return tuple(self.construct_sequence(node))
+STEMS = ['vocals', 'drums', 'bass', 'guitar', 'other']
 
-SafeLoaderWithTuple.add_constructor(
-    'tag:yaml.org,2002:python/tuple', 
-    SafeLoaderWithTuple.construct_python_tuple
-)
 
-def load_bs_roformer(config_path, checkpoint_path, device='cpu'):
-    """Loads the BS-Roformer model with the provided config and weights."""
-    print(f"[*] Loading config from: {config_path}")
-    with open(config_path, 'r') as f:
-        raw_config = yaml.load(f, Loader=SafeLoaderWithTuple)
-    
-    config = ConfigDict(raw_config)
-    
-    print(f"[*] Initializing model architecture...")
-    model = get_model_from_config("bs_roformer", config)
-    
-    print(f"[*] Loading weights from: {checkpoint_path}")
-    state_dict = torch.load(checkpoint_path, map_location=device)
-    if 'state_dict' in state_dict:
-        state_dict = state_dict['state_dict']
-        
-    model.load_state_dict(state_dict)
-    model.to(device)
-    model.eval()
-    
-    print("[+] Model loaded successfully.")
-    return model, config
+class StemSeparator(nn.Module):
+    def __init__(
+        self,
+        config_path,
+        checkpoint_path,
+        temporal_dim=256,
+        temporal_kernel=3,
+        temporal_layers=4,
+        temporal_dilation=2,
+        device='cpu'
+    ):
+        super().__init__()
+
+        # Load BSRoformer once and extract all pretrained components
+        full_model, _ = load_bs_roformer(config_path, checkpoint_path, device=device)
+
+        # Pretrained: STFT encoder + BandSplit
+        self.stft_kwargs    = dict(full_model.stft_kwargs)
+        self.stft_window_fn = full_model.stft_window_fn
+        self.freq_slice     = full_model.freq_slice
+        self.freq_pad       = full_model.freq_pad
+        self.audio_channels = full_model.audio_channels
+        self.band_split     = copy.deepcopy(full_model.band_split)
+
+        # Pretrained: frequency transformer (layers[0][1])
+        self.freq_transformer = copy.deepcopy(full_model.layers[0][1])
+
+        # Random init: temporal branch + gated fusion
+        self.temporal_branch = TemporalBranch(
+            dim=temporal_dim,
+            kernel_size=temporal_kernel,
+            num_layers=temporal_layers,
+            base_dilation=temporal_dilation
+        )
+        self.gated_fusion = GatedFusion(dim=temporal_dim)
+
+        # Pretrained: decoder heads (first 5 MaskEstimators)
+        self.decoder_heads = nn.ModuleList([
+            copy.deepcopy(full_model.mask_estimators[i]) for i in range(5)
+        ])
+
+        del full_model
+        self.to(device)
+
+    def _encode(self, audio):
+        """(b, 2, samples) -> x: (b, T, 62, 256), stft_repr: (b, f*channels, T, 2)"""
+        device = audio.device
+        b, s, _ = audio.shape
+
+        stft_window = self.stft_window_fn(device=device)
+        stft = torch.stft(
+            audio.reshape(b * s, -1),
+            **self.stft_kwargs, window=stft_window, return_complex=True
+        )
+        stft = torch.view_as_real(stft)                                     # (b*s, f, T, 2)
+        f, T = stft.shape[1], stft.shape[2]
+        stft = stft.reshape(b, s, f, T, 2)[:, :, self.freq_slice]          # (b, s, f', T, 2)
+        stft_repr = rearrange(stft, 'b s f t c -> b (f s) t c')            # (b, f*s, T, 2)
+
+        x = self.band_split(rearrange(stft_repr, 'b f t c -> b t (f c)'))  # (b, T, 62, 256)
+        return x, stft_repr
+
+    def _freq_transform(self, x):
+        """(b, T, f, d) -> same shape, attention over frequency bands"""
+        b, t, f, d = x.shape
+        x = x.reshape(b * t, f, d)
+        x, *_ = self.freq_transformer(x)
+        return x.reshape(b, t, f, d)
+
+    def _decode(self, fused, stft_repr):
+        """(b, T, 62, 256) + stft_repr -> (b, 5, channels, samples)"""
+        device = fused.device
+
+        masks = torch.stack([head(fused) for head in self.decoder_heads], dim=1)  # (b, 5, T, 4100)
+        masks = rearrange(masks, 'b n t (f c) -> b n f t c', c=2)
+
+        stft  = torch.view_as_complex(rearrange(stft_repr, 'b f t c -> b 1 f t c').contiguous())
+        masks = torch.view_as_complex(masks.contiguous())
+        stft  = stft * masks  # (b, 5, f*s, T) complex
+
+        stft_window = self.stft_window_fn(device=device)
+        stft = rearrange(stft, 'b n (f s) t -> (b n s) f t', s=self.audio_channels)
+        stft = F.pad(stft, (0, 0, *self.freq_pad))
+
+        audio = torch.istft(stft, **self.stft_kwargs, window=stft_window, return_complex=False)
+        return rearrange(audio, '(b n s) t -> b n s t', s=self.audio_channels, n=5)
+
+    def forward(self, audio):
+        """
+        audio: (batch, 2, samples)
+        Returns: (batch, 5, 2, samples) - one stereo waveform per stem
+        """
+        x, stft_repr = self._encode(audio)
+
+        freq_out = self._freq_transform(x)
+        temp_out = self.temporal_branch(x)
+        fused    = self.gated_fusion(freq_out, temp_out)
+
+        return self._decode(fused, stft_repr)
+
 
 if __name__ == "__main__":
-    CONFIG_FILE = "models\\roformer-model-bs-roformer-sw-by-jarredou\\BS-Rofo-SW-Fixed.yaml" 
-    CHECKPOINT_FILE = "models\\roformer-model-bs-roformer-sw-by-jarredou\\BS-Rofo-SW-Fixed.ckpt" 
+    CONFIG_FILE     = "weights\\roformer-model-bs-roformer-sw-by-jarredou\\BS-Rofo-SW-Fixed.yaml"
+    CHECKPOINT_FILE = "weights\\roformer-model-bs-roformer-sw-by-jarredou\\BS-Rofo-SW-Fixed.ckpt"
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
-    try:
-        model, config = load_bs_roformer(CONFIG_FILE, CHECKPOINT_FILE, device=DEVICE)
-        
-        # Audio parameters from YAML [cite: 67, 72]
-        batch_size = 1
-        num_channels = config.audio.num_channels   # 2
-        chunk_size = config.audio.chunk_size       # 588800
-        n_fft = config.model.stft_n_fft            # 2048
-        hop_length = config.model.stft_hop_length   # 512
-        win_length = config.model.stft_win_length   # 2048
 
-        # 1. Create Dummy Input
-        print(f"[*] Input waveform: {batch_size}x{num_channels}x{chunk_size}")
-        dummy_input = torch.randn(batch_size, num_channels, chunk_size).to(DEVICE)
+    try:
+        model = StemSeparator(CONFIG_FILE, CHECKPOINT_FILE, device=DEVICE)
+        model.eval()
+        print(f"[+] Model built on {DEVICE}")
+
+        dummy_audio = torch.randn(1, 2, 588800).to(DEVICE)
+        print(f"[*] Input:  {dummy_audio.shape}  (batch, channels, samples)")
 
         with torch.no_grad():
-            # 2. STEP 1: Manual STFT 
-            # Output: (Batch, Channels, Freqs, Time) Complex
-            print("[*] STEP 1: Calculating STFT...")
-            audio_reshaped = dummy_input.reshape(-1, chunk_size)
-            spec = torch.stft(
-                audio_reshaped,
-                n_fft=n_fft,
-                hop_length=hop_length,
-                win_length=win_length,
-                window=torch.hann_window(win_length).to(DEVICE),
-                center=True,
-                pad_mode='reflect',
-                normalized=config.model.stft_normalized,
-                onesided=True,
-                return_complex=True
-            )
-            spec = spec.reshape(batch_size, num_channels, spec.shape[-2], spec.shape[-1])
-            print(f"[+] Complex Spectrogram shape: {spec.shape}")
+            stems = model(dummy_audio)
 
-            # 3. STEP 2: Feature Engineering for BandSplit 
-            # Convert Complex to Real: (B, C, F, T) -> (B, C, F, T, 2)
-            spec_real = torch.view_as_real(spec)
-            
-            # Permute to (Batch, Time, Channels, Freq, Real/Imag)
-            spec_real = spec_real.permute(0, 3, 1, 2, 4)
-            
-            # Flatten into (Batch, Time, 4100) where 4100 = 2 channels * 1025 freqs * 2
-            x_in = spec_real.reshape(batch_size, spec.shape[-1], -1)
-            print(f"[+] Reshaped input for BandSplit: {x_in.shape}")
-
-            # 4. STEP 3: Run BandSplit Encoder [cite: 51, 52]
-            print("[*] STEP 2: Running BandSplit Encoder...")
-            # FIXED: Removed the extra unpacking variable as your model returns only x
-            x = model.band_split(x_in)
-            print(f"[+] Transformer latent input shape: {x.shape}")
-
-            # 5. STEP 4: Isolate and Run First Transformer Block 
-            # model.layers[0] is the first of 12 layers; index 0 is the first sub-transformer.
-            print("[*] STEP 3: Running Isolated Transformer Block...")
-            first_block = model.layers[0][0] 
-            block_output = first_block(x)
-            
-            print(f"[+] Block Output Shape: {block_output.shape}")
-            
-            if block_output.shape == x.shape:
-                print("[*] SUCCESS: Block 0 executed and preserved sequence dimensions.")
+        print(f"[+] Output: {stems.shape}  (batch, stems, channels, samples)")
+        assert stems.shape == (1, 5, 2, 588800), f"Unexpected shape: {stems.shape}"
+        print(f"[*] Stems: {STEMS}")
+        print("[*] SUCCESS: Full pipeline works end-to-end.")
 
     except Exception as e:
         import traceback
