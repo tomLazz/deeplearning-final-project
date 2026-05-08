@@ -72,14 +72,13 @@ def main():
         "lr": 1e-4
     },
     {
-        "params": list(model.decoder_heads.parameters()) +
-                  list(model.freq_transformer.parameters()),
+        "params": list(model.decoder_heads.parameters()), 
         "lr": 1e-6
     }
 ], weight_decay=1e-4)
 
     best_val_loss = float("inf")
-    num_epochs = 10
+    num_epochs = 30
 
     for epoch in range(num_epochs):
         model.train()

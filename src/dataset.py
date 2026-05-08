@@ -19,7 +19,7 @@ STEM_FOLDERS = {
 
 
 class RawStemsDataset(Dataset):
-    def __init__(self, root_dir, chunk_size=588800):
+    def __init__(self, root_dir, chunk_size=294400):
         self.root_dir = Path(root_dir)
         self.chunk_size = chunk_size
 
