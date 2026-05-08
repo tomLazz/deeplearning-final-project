@@ -19,7 +19,8 @@ STEM_FOLDERS = {
 
 
 class RawStemsDataset(Dataset):
-    def __init__(self, root_dir, chunk_size=294400):
+    # def __init__(self, root_dir, chunk_size=588800): # approx 13-15 seconds for each chunk
+    def __init__(self, root_dir, chunk_size=294400): # approx 6-7 seconds for each chunk
         self.root_dir = Path(root_dir)
         self.chunk_size = chunk_size
 

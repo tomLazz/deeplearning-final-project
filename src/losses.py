@@ -19,6 +19,7 @@ class SeparationLoss(nn.Module):
 
         window = torch.hann_window(self.win_length, device=pred.device)
 
+        # STFT for the predicted audio (wav form to frequency-time form)
         pred_stft = torch.stft(
             pred_flat,
             n_fft=self.n_fft,
@@ -28,6 +29,7 @@ class SeparationLoss(nn.Module):
             return_complex=True
         )
 
+        # STFT for the target audio (wav form to frequency-time form)
         target_stft = torch.stft(
             target_flat,
             n_fft=self.n_fft,
@@ -39,7 +41,7 @@ class SeparationLoss(nn.Module):
 
         pred_mag = torch.abs(pred_stft)
         target_mag = torch.abs(target_stft)
-
+        # Because we use STFT so the l1 loss becomes spectral loss
         spectral_loss = F.l1_loss(pred_mag, target_mag)
 
         return spectral_loss
