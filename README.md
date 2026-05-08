@@ -4,17 +4,23 @@ TODO (one line)
 
 ## Setup
 
-Download the [pretrained transformer model] using [bs-roformer-infer]
+Install the Python dependencies using uv
 
 ```bash
-pip install bs-roformer-infer
-bs-roformer-download --model roformer-model-bs-roformer-sw-by-jarredou
+uv sync
+source .venv/bin/activate
 ```
 
-Install the Python dependencies
+Install the Python dependencies using pip
 
 ```bash
 pip install -r requirements.txt
+```
+
+Download the [pretrained transformer model] using [bs-roformer-infer]
+
+```bash
+bs-roformer-download --model roformer-model-bs-roformer-sw-by-jarredou
 ```
 
 ## Commands to reproduce the results
