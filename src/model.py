@@ -1,7 +1,6 @@
 import copy
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange
 from frequency_transformer import load_bs_roformer
 from time_module import TemporalBranch
@@ -29,8 +28,6 @@ class StemSeparator(nn.Module):
         # Pretrained: STFT encoder + BandSplit
         self.stft_kwargs    = dict(full_model.stft_kwargs)
         self.stft_window_fn = full_model.stft_window_fn
-        self.freq_slice     = full_model.freq_slice
-        self.freq_pad       = full_model.freq_pad
         self.audio_channels = full_model.audio_channels
         self.band_split     = copy.deepcopy(full_model.band_split)
 
@@ -66,7 +63,7 @@ class StemSeparator(nn.Module):
         )
         stft = torch.view_as_real(stft)                                     # (b*s, f, T, 2)
         f, T = stft.shape[1], stft.shape[2]
-        stft = stft.reshape(b, s, f, T, 2)[:, :, self.freq_slice]          # (b, s, f', T, 2)
+        stft = stft.reshape(b, s, f, T, 2)                                  # (b, s, f, T, 2)
         stft_repr = rearrange(stft, 'b s f t c -> b (f s) t c')            # (b, f*s, T, 2)
 
         x = self.band_split(rearrange(stft_repr, 'b f t c -> b t (f c)'))  # (b, T, 62, 256)
@@ -76,7 +73,8 @@ class StemSeparator(nn.Module):
         """(b, T, f, d) -> same shape, attention over frequency bands"""
         b, t, f, d = x.shape
         x = x.reshape(b * t, f, d)
-        x, *_ = self.freq_transformer(x)
+        out = self.freq_transformer(x)
+        x = out[0] if isinstance(out, tuple) else out
         return x.reshape(b, t, f, d)
 
     def _decode(self, fused, stft_repr):
@@ -92,7 +90,6 @@ class StemSeparator(nn.Module):
 
         stft_window = self.stft_window_fn(device=device)
         stft = rearrange(stft, 'b n (f s) t -> (b n s) f t', s=self.audio_channels)
-        stft = F.pad(stft, (0, 0, *self.freq_pad))
 
         audio = torch.istft(stft, **self.stft_kwargs, window=stft_window, return_complex=False)
         return rearrange(audio, '(b n s) t -> b n s t', s=self.audio_channels, n=5)

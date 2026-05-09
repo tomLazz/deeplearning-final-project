@@ -2,39 +2,60 @@ import copy
 import torch
 import yaml
 from ml_collections import ConfigDict
-from bs_roformer import get_model_from_config
+from bs_roformer import BSRoformer
 import torch.nn as nn
 
-# 1. Custom Loader to handle !!python/tuple in the YAML
+# Custom Loader to handle !!python/tuple in the YAML
 class SafeLoaderWithTuple(yaml.SafeLoader):
     def construct_python_tuple(self, node):
         return tuple(self.construct_sequence(node))
 
 SafeLoaderWithTuple.add_constructor(
-    'tag:yaml.org,2002:python/tuple', 
+    'tag:yaml.org,2002:python/tuple',
     SafeLoaderWithTuple.construct_python_tuple
 )
+
+def _build_model_from_config(config):
+    model_config = dict(config.model)
+    for param in ['multi_stft_resolutions_window_sizes', 'freqs_per_bands']:
+        if param in model_config and isinstance(model_config[param], list):
+            model_config[param] = tuple(model_config[param])
+    valid_params = {
+        'dim', 'depth', 'stereo', 'num_stems', 'time_transformer_depth',
+        'freq_transformer_depth', 'freqs_per_bands', 'freq_range', 'dim_head',
+        'heads', 'attn_dropout', 'ff_dropout', 'flash_attn', 'num_residual_streams',
+        'num_residual_fracs', 'dim_freqs_in', 'stft_n_fft', 'stft_hop_length',
+        'stft_win_length', 'stft_normalized', 'zero_dc', 'stft_window_fn',
+        'mask_estimator_depth', 'multi_stft_resolution_loss_weight',
+        'multi_stft_resolutions_window_sizes', 'multi_stft_hop_size',
+        'multi_stft_normalized', 'multi_stft_window_fn'
+    }
+    return BSRoformer(**{k: v for k, v in model_config.items() if k in valid_params})
 
 def load_bs_roformer(config_path, checkpoint_path, device='cpu'):
     """Loads the BS-Roformer model with the provided config and weights."""
     print(f"[*] Loading config from: {config_path}")
     with open(config_path, 'r') as f:
         raw_config = yaml.load(f, Loader=SafeLoaderWithTuple)
-    
+
     config = ConfigDict(raw_config)
-    
+
     print(f"[*] Initializing model architecture...")
-    model = get_model_from_config("bs_roformer", config)
-    
+    model = _build_model_from_config(config)
+
     print(f"[*] Loading weights from: {checkpoint_path}")
     state_dict = torch.load(checkpoint_path, map_location=device)
     if 'state_dict' in state_dict:
         state_dict = state_dict['state_dict']
         
-    model.load_state_dict(state_dict)
+    result = model.load_state_dict(state_dict, strict=False)
+    if result.missing_keys:
+        print(f"[!] Missing keys (randomly initialized): {len(result.missing_keys)}")
+    if result.unexpected_keys:
+        print(f"[!] Unexpected keys (ignored): {len(result.unexpected_keys)}")
     model.to(device)
     model.eval()
-    
+
     print("[+] Model loaded successfully.")
     return model, config
 
@@ -53,7 +74,8 @@ class FrequencyTransformer(nn.Module):
         # The Transformer block expects (batch, seq, dim), so merge batch and time dims
         b, t, f, d = x.shape
         x = x.reshape(b * t, f, d)
-        x, *_ = self.transformer(x)
+        out = self.transformer(x)
+        x = out[0] if isinstance(out, tuple) else out
         return x.reshape(b, t, f, d)
 
 
