@@ -1,6 +1,7 @@
 ## Description
 
-TODO (one line)
+Music stem separation based on a [pretrained transformer model],
+with additional training and testing using the [RawStems] corpus.
 
 ## Setup
 
@@ -25,11 +26,14 @@ TODO (one line)
 
 ## Commands to reproduce the results
 
-TODO
+1. Follow the last section to set up the dependencies.
+
+2. Run [newmodel_training.ipynb](notebooks/newmodel_training.ipynb) on Google Colab.
+   Make sure the required files are mounted at the correct path in your Google Drive.
 
 ## Expected runtime and hardware
 
-TODO
+Training is expected to take around 11 hours on a high-RAM A100 GPU.
 
 [RawStems]: https://huggingface.co/datasets/yongyizang/RawStems
 [bs-roformer-infer]: https://github.com/openmirlab/bs-roformer-infer
