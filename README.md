@@ -4,24 +4,24 @@ TODO (one line)
 
 ## Setup
 
-Install the Python dependencies using uv
+1. Install Python dependencies
 
-```bash
-uv sync
-source .venv/bin/activate
-```
+   ```bash
+   # with uv
+   uv sync
+   source .venv/bin/activate
 
-Install the Python dependencies using pip
+   # or with pip
+   pip install -r requirements.txt
+   ```
 
-```bash
-pip install -r requirements.txt
-```
+2. Download the [pretrained transformer model] using [bs-roformer-infer]
 
-Download the [pretrained transformer model] using [bs-roformer-infer]
+   ```bash
+   bs-roformer-download --model roformer-model-bs-roformer-sw-by-jarredou
+   ```
 
-```bash
-bs-roformer-download --model roformer-model-bs-roformer-sw-by-jarredou
-```
+3. Download [RawStems] to the `rawstems` directory
 
 ## Commands to reproduce the results
 
@@ -31,5 +31,6 @@ TODO
 
 TODO
 
+[RawStems]: https://huggingface.co/datasets/yongyizang/RawStems
 [bs-roformer-infer]: https://github.com/openmirlab/bs-roformer-infer
 [pretrained transformer model]: https://huggingface.co/jarredou/BS-ROFO-SW-Fixed

@@ -1,9 +1,0 @@
-bs-roformer-infer==0.1.1
-BS-RoFormer==0.5.1
-einops==0.8.2
-ml_collections==1.1.0
-PyYAML==6.0.3
-librosa==0.11.0
-soundfile==0.13.1
-rotary-embedding-torch==0.8.9
-beartype==0.22.9
